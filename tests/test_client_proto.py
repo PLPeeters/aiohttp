@@ -1,4 +1,5 @@
 import asyncio
+import gzip
 from unittest import mock
 
 import pytest
@@ -12,7 +13,7 @@ from aiohttp.client_exceptions import ClientOSError, ServerDisconnectedError
 from aiohttp.client_proto import ResponseHandler
 from aiohttp.client_reqrep import ClientResponse
 from aiohttp.helpers import DEFAULT_CHUNK_SIZE, TimerNoop
-from aiohttp.http_parser import HttpParser, RawResponseMessage
+from aiohttp.http_parser import HttpParser, HttpResponseParserPy, RawResponseMessage
 
 
 async def test_force_close() -> None:
@@ -62,11 +63,14 @@ async def test_client_proto_bad_message() -> None:
     assert isinstance(proto.exception(), http.HttpProcessingError)
 
 
-async def test_uncompleted_message() -> None:
+@pytest.mark.parametrize("in_executor", [False, True])
+async def test_uncompleted_message(in_executor: bool) -> None:
     proto = ResponseHandler(loop=asyncio.get_running_loop())
     transport = mock.Mock()
     proto.connection_made(transport)
-    proto.set_response_params(read_until_eof=True)
+    proto.set_response_params(
+        read_until_eof=True, auto_decompress_in_executor=in_executor
+    )
 
     proto.data_received(
         b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://python.org/"
@@ -92,6 +96,38 @@ async def test_data_received_after_close() -> None:
     assert proto.should_close
     assert not transport.close.called
     assert isinstance(proto.exception(), http.HttpProcessingError)
+
+
+async def test_abort_clears_deferred_decompression_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("aiohttp.client_proto.HttpResponseParser", HttpResponseParserPy)
+    proto = ResponseHandler(loop=asyncio.get_running_loop())
+    proto.connection_made(mock.Mock())
+    proto.set_response_params(
+        read_until_eof=True, auto_decompress_in_executor=True, read_bufsize=1024
+    )
+
+    body = b"deferred body" * 10_000
+    compressed = gzip.compress(body)
+    proto.data_received(
+        b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n\r\n" + compressed
+    )
+    _, payload = await proto.read()
+    proto.connection_lost(None)
+
+    # Read into locals so mypy does not narrow the attributes abort() resets.
+    deferred_eof = proto._deferred_eof
+    parser = proto._parser
+    assert deferred_eof
+    assert parser is not None
+    assert proto._payload is payload
+
+    proto.abort()
+
+    assert not proto._deferred_eof
+    assert proto._parser is None
+    assert proto._payload is None
 
 
 async def test_multiple_responses_one_byte_at_a_time() -> None:
