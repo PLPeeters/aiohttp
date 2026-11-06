@@ -185,6 +185,12 @@ class StreamReader:
     def exception(self) -> BaseException | None:
         return self._exception
 
+    def _can_resume_reading(self) -> bool:
+        return self._size <= self._high_water and (
+            self._http_chunk_splits is None
+            or len(self._http_chunk_splits) <= self._high_water_chunks
+        )
+
     def set_exception(
         self,
         exc: BaseException,
@@ -346,7 +352,9 @@ class StreamReader:
             set_result(waiter, None)
 
     async def _wait(self, func_name: str) -> None:
-        if not self._protocol.connected:
+        if self._exception is not None:
+            raise self._exception
+        if not self._protocol.can_receive_data:
             raise RuntimeError("Connection closed.")
 
         # StreamReader uses a future to link the protocol feed_data() method
