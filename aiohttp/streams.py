@@ -346,7 +346,9 @@ class StreamReader:
             set_result(waiter, None)
 
     async def _wait(self, func_name: str) -> None:
-        if not self._protocol.connected:
+        if self._exception is not None:
+            raise self._exception
+        if not self._protocol.can_receive_data:
             raise RuntimeError("Connection closed.")
 
         # StreamReader uses a future to link the protocol feed_data() method

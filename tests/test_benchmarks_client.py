@@ -1,6 +1,7 @@
 """codspeed benchmarks for HTTP client."""
 
 import asyncio
+import zlib
 from typing import TYPE_CHECKING
 
 import pytest
@@ -270,6 +271,46 @@ def test_get_request_with_251308_compressed_chunked_payload(
         client = await aiohttp_client(app)
         resp = await client.get("/")
         await resp.read()
+        await client.close()
+
+    @benchmark
+    def _run() -> None:
+        loop.run_until_complete(run_client_benchmark())
+
+
+@pytest.mark.parametrize(
+    ("encoded", "offload"),
+    ((False, False), (False, True), (True, False), (True, True)),
+    ids=("raw-inline", "raw-executor", "gzip-inline", "gzip-executor"),
+)
+def test_get_precompressed_response_decode(
+    loop: asyncio.AbstractEventLoop,
+    aiohttp_client: AiohttpClient,
+    benchmark: BenchmarkFixture,
+    encoded: bool,
+    offload: bool,
+) -> None:
+    """Benchmark reading raw bytes and decoding precompressed responses."""
+    payload = b"".join(
+        bytes((*range(i), *range(i, 0, -1))) for _ in range(255) for i in range(255)
+    )
+    compressor = zlib.compressobj(wbits=16 + zlib.MAX_WBITS)
+    compressed_payload = compressor.compress(payload) + compressor.flush()
+
+    async def handler(request: web.Request) -> web.Response:
+        headers = {hdrs.CONTENT_ENCODING: "gzip"} if encoded else {}
+        return web.Response(
+            body=compressed_payload,
+            headers=headers,
+        )
+
+    app = web.Application()
+    app.router.add_route("GET", "/", handler)
+
+    async def run_client_benchmark() -> None:
+        client = await aiohttp_client(app, auto_decompress_in_executor=offload)
+        async with client.get("/") as response:
+            await response.read()
         await client.close()
 
     @benchmark

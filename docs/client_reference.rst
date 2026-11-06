@@ -50,6 +50,7 @@ The client session supports the context manager protocol for self closing.
                          raise_for_status=False, \
                          timeout=sentinel, \
                          auto_decompress=True, \
+                         auto_decompress_in_executor=False, \
                          trust_env=False, \
                          requote_redirect_url=True, \
                          trace_configs=None, \
@@ -196,6 +197,12 @@ The client session supports the context manager protocol for self closing.
 
       .. versionadded:: 2.3
 
+   :param bool auto_decompress_in_executor: Run automatic response decompression
+      in the event loop's default thread pool (``False`` by default). Applies
+      to all supported content encodings and preserves streaming and read-buffer
+      flow control. Ignored when ``auto_decompress`` is ``False``.
+
+      .. versionadded:: 3.14
    :param bool trust_env: Trust environment settings for proxy configuration if the parameter
       is ``True`` (``False`` by default). See :ref:`aiohttp-client-proxy-support` for
       more information.
@@ -397,6 +404,13 @@ The client session supports the context manager protocol for self closing.
 
       .. versionadded:: 3.7
 
+   .. attribute:: auto_decompress_in_executor
+
+      Whether automatic response decompression uses the event loop's default
+      thread pool. Read-only :class:`bool`; defaults to ``False``.
+
+      .. versionadded:: 4.0
+
    .. attribute:: trust_env
 
       Trust environment settings for proxy configuration
@@ -429,6 +443,7 @@ The client session supports the context manager protocol for self closing.
                          middlewares=None, \
                          read_bufsize=None, \
                          auto_decompress=None, \
+                         auto_decompress_in_executor=None, \
                          max_line_size=None, \
                          max_field_size=None, \
                          max_headers=None)
@@ -600,6 +615,13 @@ The client session supports the context manager protocol for self closing.
       :param bool auto_decompress: Automatically decompress response body.
          Overrides :attr:`ClientSession.auto_decompress`.
          May be used to enable/disable auto decompression on a per-request basis.
+
+      :param bool auto_decompress_in_executor: Run automatic response decompression
+         in the event loop's default thread pool. ``None`` uses
+         :attr:`ClientSession.auto_decompress_in_executor`; ``True`` or ``False``
+         overrides it for this request. Ignored when ``auto_decompress`` is ``False``.
+
+         .. versionadded:: 4.0
 
       :param int max_line_size: Maximum allowed size of lines in responses.
 
@@ -933,6 +955,7 @@ certification chaining.
                         trace_request_ctx=None, \
                         read_bufsize=None, \
                         auto_decompress=None, \
+                        auto_decompress_in_executor=None, \
                         max_line_size=None, \
                         max_field_size=None, \
                         max_headers=None, \
@@ -1072,6 +1095,12 @@ certification chaining.
 
    :param bool auto_decompress: Automatically decompress response body.
       May be used to enable/disable auto decompression on a per-request basis.
+
+   :param bool auto_decompress_in_executor: Run automatic response decompression
+      in the event loop's default thread pool. Defaults to ``False`` through
+      the temporary session. Ignored when ``auto_decompress`` is ``False``.
+
+      .. versionadded:: 4.0
 
    :param int max_line_size: Maximum allowed size of lines in responses.
 
