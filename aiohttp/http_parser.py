@@ -383,7 +383,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
             messages, upgraded, tail = self.feed_data(b"")
             if upgraded:
                 return messages, upgraded, tail + data
-            if self._payload_has_more_data or self.protocol._reading_paused:
+            if self._payload_has_more_data:
                 self._tail = tail + data
                 return messages, upgraded, b""
             following, upgraded, tail = self.feed_data(tail + data)
@@ -1323,15 +1323,19 @@ class DeflateBuffer:
 
     def _decompression_done(self, future: asyncio.Future[bytes]) -> None:
         # A consumer can resume parsing before this callback runs.
-        if self._pending is not future:
+        if self._pending is not None and self._pending is not future:
             return
-        protocol = cast("ResponseHandler", self.out._protocol)
-        if protocol._payload is self.out and self.out.exception() is None:
-            protocol.resume_reading()
-        else:
-            # Closing a response cannot stop a running executor operation.
+        if not future.cancelled():
+            # A later drain still raises this through result().
             future.exception()
+        protocol = cast("ResponseHandler", self.out._protocol)
+        if protocol._payload is not self.out or self.out.exception() is not None:
+            # Closing a response cannot stop a running executor operation.
             self._pending = None
+        elif self.out._size <= self.out._high_water:
+            # Also resume when a drain already consumed this result, as that
+            # drain can leave reading paused without starting another decode.
+            protocol.resume_reading()
 
     def feed_eof(self) -> None:
         chunk = self.decompressor.flush()
