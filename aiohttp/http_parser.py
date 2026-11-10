@@ -330,12 +330,6 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
             self.feed_data(b"")
             if self._payload_has_more_data:
                 return None
-        if (
-            self._auto_decompress_in_executor
-            and self._payload_parser is not None
-            and self._tail
-        ):
-            return None
         if self._payload_parser is not None:
             self._payload_parser.feed_eof()
             if self._payload_parser.done:
