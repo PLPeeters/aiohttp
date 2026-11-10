@@ -309,9 +309,11 @@ def test_get_precompressed_response_decode(
 
     async def run_client_benchmark() -> None:
         client = await aiohttp_client(app, auto_decompress_in_executor=offload)
-        async with client.get("/") as response:
-            await response.read()
-        await client.close()
+        try:
+            async with client.get("/") as response:
+                await response.read()
+        finally:
+            await client.close()
 
     @benchmark
     def _run() -> None:
