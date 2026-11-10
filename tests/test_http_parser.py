@@ -1865,12 +1865,12 @@ async def test_executor_decompression_feed_eof_preserves_pending_response(
 
 
 def test_executor_decompression_feed_eof_reports_incomplete_payload(
-    event_loop: asyncio.AbstractEventLoop,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
-    protocol = ResponseHandler(event_loop)
+    protocol = ResponseHandler(loop)
     parser = HttpResponseParserPy(
         protocol,
-        event_loop,
+        loop,
         DEFAULT_CHUNK_SIZE,
         max_line_size=8190,
         offload_decompression=True,
