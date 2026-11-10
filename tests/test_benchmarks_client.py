@@ -401,12 +401,15 @@ def test_get_precompressed_response_decode(
         async with session.get(client.make_url("/")) as response:
             await response.read()
 
-    @benchmark
-    def _run() -> None:
-        event_loop.run_until_complete(run_client_benchmark())
+    try:
 
-    event_loop.run_until_complete(session.close())
-    event_loop.run_until_complete(client.close())
+        @benchmark
+        def _run() -> None:
+            event_loop.run_until_complete(run_client_benchmark())
+
+    finally:
+        event_loop.run_until_complete(session.close())
+        event_loop.run_until_complete(client.close())
 
 
 def test_one_hundred_get_requests_with_1024_content_length_payload(
