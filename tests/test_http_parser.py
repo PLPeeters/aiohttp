@@ -2063,6 +2063,49 @@ async def test_executor_decompression_failure_over_high_water_is_retrieved(
     assert not failed[0]._log_traceback
 
 
+async def test_executor_decompression_cancelled_after_close(
+    executor_protocol: ResponseHandler,
+) -> None:
+    protocol = executor_protocol
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    release_worker = Event()
+    worker_started = Event()
+
+    def block_executor() -> None:
+        worker_started.set()
+        release_worker.wait()
+
+    executor.submit(block_executor)
+    loop_errors: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+
+    try:
+        assert worker_started.wait(2)
+        compressed = gzip.compress(b"body")
+        protocol.data_received(
+            b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: "
+            + str(len(compressed)).encode()
+            + b"\r\n\r\n"
+            + compressed
+        )
+        await protocol.read()
+
+        # Shutting down an executor can cancel work that has not started.
+        # Closing the response before the cancellation callback runs must not
+        # ask a cancelled asyncio Future for its exception.
+        executor.shutdown(wait=False, cancel_futures=True)
+        protocol.close()
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+        assert not loop_errors
+    finally:
+        release_worker.set()
+        executor.shutdown(wait=True)
+
+
 async def test_executor_decompression_upgrade_preserves_queued_data(
     executor_protocol: ResponseHandler,
 ) -> None:
