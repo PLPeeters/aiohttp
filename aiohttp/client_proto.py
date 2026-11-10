@@ -228,9 +228,14 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
         super().resume_reading(resume_parser)
         if resume_parser and self._deferred_eof:
             self._finish_deferred_eof()
-        # sock_read measures the peer, so it stays stopped while the tail
-        # bound is still holding the transport.
-        if was_paused and not self._buffer_paused and not self._connection_lost_called:
+        # sock_read measures the peer, so it stays stopped while a local pause
+        # still holds the transport.
+        if (
+            was_paused
+            and not self._reading_paused
+            and not self._buffer_paused
+            and not self._connection_lost_called
+        ):
             self._reschedule_timeout()
 
     def _finish_deferred_eof(self) -> None:
