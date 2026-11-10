@@ -1,0 +1,3 @@
+Remove ``auto_decompress_in_executor`` from client APIs. Automatic response
+decompression now always runs in the event loop's default thread pool when
+``auto_decompress`` is enabled -- by :user:`plpeeters`.

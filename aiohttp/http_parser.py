@@ -290,7 +290,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         read_until_eof: bool = False,
         auto_decompress: bool = True,
         max_msg_queue_size: int = 0,
-        auto_decompress_in_executor: bool = False,
+        offload_decompression: bool = False,
     ) -> None:
         self.protocol = protocol
         self.loop = loop
@@ -313,7 +313,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         self._payload_parser: HttpPayloadParser | None = None
         self._payload_has_more_data = False
         self._auto_decompress = auto_decompress
-        self._auto_decompress_in_executor = auto_decompress_in_executor
+        self._offload_decompression = offload_decompression and auto_decompress
         self._limit = limit
         self._headers_parser = HeadersParser(
             max_line_size, max_headers, max_field_size, self.lax
@@ -338,7 +338,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
             self._msg_in_flight -= 1
 
     def feed_eof(self) -> _MsgT | None:
-        if self._auto_decompress_in_executor and self._payload_has_more_data:
+        if self._offload_decompression and self._payload_has_more_data:
             self.feed_data(b"")
             if self._payload_has_more_data:
                 return None
@@ -372,7 +372,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
         if self._tail:
             data, self._tail = self._tail + data, b""
 
-        if self._auto_decompress_in_executor and self._payload_has_more_data and data:
+        if self._offload_decompression and self._payload_has_more_data and data:
             # Finish the in-flight decode before accepting another body fragment.
             messages, upgraded, tail = self.feed_data(b"")
             if upgraded:
@@ -490,7 +490,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 code=self.code,
                                 response_with_body=self.response_with_body,
                                 auto_decompress=self._auto_decompress,
-                                auto_decompress_in_executor=self._auto_decompress_in_executor,
+                                offload_decompression=self._offload_decompression,
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -518,7 +518,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 method=msg.method,
                                 compression=msg.compression,
                                 auto_decompress=self._auto_decompress,
-                                auto_decompress_in_executor=self._auto_decompress_in_executor,
+                                offload_decompression=self._offload_decompression,
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -542,7 +542,7 @@ class HttpParser(abc.ABC, Generic[_MsgT]):
                                 code=self.code,
                                 response_with_body=self.response_with_body,
                                 auto_decompress=self._auto_decompress,
-                                auto_decompress_in_executor=self._auto_decompress_in_executor,
+                                offload_decompression=self._offload_decompression,
                                 lax=self.lax,
                                 headers_parser=self._headers_parser,
                                 max_line_size=self.max_line_size,
@@ -929,7 +929,7 @@ class HttpPayloadParser:
         max_field_size: int = 8190,
         max_trailers: int = 128,
         limit: int = DEFAULT_CHUNK_SIZE,
-        auto_decompress_in_executor: bool = False,
+        offload_decompression: bool = False,
     ) -> None:
         self._length = 0
         self._paused = False
@@ -954,7 +954,7 @@ class HttpPayloadParser:
                 payload,
                 compression,
                 max_decompress_size=limit,
-                in_executor=auto_decompress_in_executor,
+                in_executor=offload_decompression,
             )
         else:
             real_payload = payload
