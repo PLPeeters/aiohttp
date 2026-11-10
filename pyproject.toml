@@ -4,6 +4,8 @@ requires = [
     # setuptools >= 77.0 required for PEP 639 SPDX license metadata
     # (it also covers the >= 67.0 floor needed for Python 3.12+ support).
     "setuptools >= 77.0",
+    "Cython >= 3.2.5",
+    "multidict >= 6.7.1",
 ]
 build-backend = "setuptools.build_meta"
 

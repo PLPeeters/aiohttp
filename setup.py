@@ -1,5 +1,6 @@
 import os
 import pathlib
+import subprocess
 import sys
 
 from setuptools import Extension, setup
@@ -85,6 +86,26 @@ extensions = [
 
 
 class ParallelBuildExt(build_ext):
+    def run(self) -> None:
+        # Generate the vendored llhttp sources if missing
+        if not USE_SYSTEM_DEPS:
+            llhttp_build = HERE / "vendor/llhttp/build"
+
+            if not (
+                (llhttp_build / "c/llhttp.c").is_file()
+                and (llhttp_build / "llhttp.h").is_file()
+            ):
+                subprocess.run(["make", "generate-llhttp"], cwd=HERE, check=True)
+
+        # Generate aiohttp C sources from Cython/Python
+        subprocess.run(
+            ["make", "cythonize-nodeps"],
+            cwd=HERE,
+            check=True,
+        )
+
+        super().run()
+
     def build_extensions(self) -> None:
         if self.parallel is None:
             self.parallel = os.cpu_count() or 1
