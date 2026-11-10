@@ -93,9 +93,9 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
     def close(self) -> None:
         self._exception = None  # Break cyclic references
         if self._deferred_eof:
-            self._deferred_eof = False
-            self._parser = None
-            self._payload = None
+            self._fail_deferred_payload(
+                ClientPayloadError("Response payload was closed")
+            )
         transport = self.transport
         if transport is not None:
             transport.close()
@@ -106,9 +106,9 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
     def abort(self) -> None:
         self._exception = None  # Break cyclic references
         if self._deferred_eof:
-            self._deferred_eof = False
-            self._parser = None
-            self._payload = None
+            self._fail_deferred_payload(
+                ClientPayloadError("Response payload was aborted")
+            )
         transport = self.transport
         if transport is not None:
             transport.abort()
@@ -424,6 +424,14 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
                 # data_received(), the transport is already
                 # closed in this case
                 self.transport.close()
+            if (
+                isinstance(underlying_exc, asyncio.CancelledError)
+                and self._deferred_eof
+            ):
+                self._fail_deferred_payload(underlying_exc)
+                return
+            if self._deferred_eof:
+                self._fail_deferred_payload(underlying_exc)
             if not isinstance(underlying_exc, Exception):
                 raise
             # should_close is True after the call
@@ -464,3 +472,18 @@ class ResponseHandler(BaseProtocol, DataQueue[tuple[RawResponseMessage, StreamRe
 
         if upgraded and tail:
             self.data_received(tail)
+
+    def _fail_deferred_payload(self, exc: BaseException) -> None:
+        payload = self._payload
+        if isinstance(payload, StreamReader) and payload.exception() is None:
+            message = (
+                str(exc)
+                if isinstance(exc, ClientPayloadError)
+                else f"Response payload is not completed: {exc!r}"
+            )
+            set_exception(payload, ClientPayloadError(message), exc)
+
+        self._deferred_eof = False
+        self._parser = None
+        self._payload = None
+        self._reading_paused = False

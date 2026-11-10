@@ -1326,7 +1326,10 @@ class DeflateBuffer:
         if protocol._payload is not self.out or self.out.exception() is not None:
             # Closing a response cannot stop a running executor operation.
             self._pending = None
-        elif self.out._size <= self.out._high_water:
+        elif self.out._size <= self.out._high_water and (
+            self.out._http_chunk_splits is None
+            or len(self.out._http_chunk_splits) <= self.out._high_water_chunks
+        ):
             # Also resume when a drain already consumed this result, as that
             # drain can leave reading paused without starting another decode.
             protocol.resume_reading()
