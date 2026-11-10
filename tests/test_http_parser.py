@@ -1707,6 +1707,34 @@ async def test_executor_decompression_feed_eof_preserves_pending_response(
         executor.shutdown(wait=True)
 
 
+def test_executor_decompression_feed_eof_reports_incomplete_payload(
+    event_loop: asyncio.AbstractEventLoop,
+) -> None:
+    protocol = ResponseHandler(event_loop)
+    parser = HttpResponseParserPy(
+        protocol,
+        event_loop,
+        DEFAULT_CHUNK_SIZE,
+        max_line_size=8190,
+        auto_decompress_in_executor=True,
+    )
+    messages, _upgraded, _tail = parser.feed_data(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Length: 10\r\n"
+        b"Content-Encoding: gzip\r\n\r\n"
+    )
+    assert len(messages) == 1
+    payload = messages[0][-1]
+    payload_parser = parser._payload_parser
+    assert payload_parser is not None
+
+    with pytest.raises(http_exceptions.ContentLengthError):
+        parser.feed_eof()
+
+    assert parser._payload_parser is payload_parser
+    assert not payload.is_eof()
+
+
 async def test_executor_decompression_feed_eof_finishes_completed_decode(
     executor_protocol: ResponseHandler, monkeypatch: pytest.MonkeyPatch
 ) -> None:
