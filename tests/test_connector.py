@@ -9,7 +9,7 @@ import socket
 import ssl
 import sys
 import uuid
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from collections.abc import Callable, Sequence
 from concurrent import futures
 from contextlib import closing, suppress
@@ -566,14 +566,18 @@ async def test_release_already_closed(loop) -> None:
     assert not conn._release_acquired.called
 
 
+def _add_waiter(conn: aiohttp.BaseConnector, key: ConnectionKey, waiter: Any) -> None:
+    conn._waiters.setdefault(key, OrderedDict())[waiter] = None
+
+
 async def test_release_waiter_no_limit(loop, key, key2) -> None:
     # limit is 0
     conn = aiohttp.BaseConnector(limit=0, loop=loop)
     w = mock.Mock()
     w.done.return_value = False
-    conn._waiters[key][w] = None
+    _add_waiter(conn, key, w)
     conn._release_waiter()
-    assert len(conn._waiters[key]) == 0
+    assert key not in conn._waiters
     assert w.done.called
     await conn.close()
 
@@ -583,8 +587,8 @@ async def test_release_waiter_first_available(loop, key, key2) -> None:
     w1, w2 = mock.Mock(), mock.Mock()
     w1.done.return_value = False
     w2.done.return_value = False
-    conn._waiters[key][w2] = None
-    conn._waiters[key2][w1] = None
+    _add_waiter(conn, key, w2)
+    _add_waiter(conn, key2, w1)
     conn._release_waiter()
     assert (
         w1.set_result.called
@@ -600,8 +604,8 @@ async def test_release_waiter_release_first(loop, key, key2) -> None:
     w1, w2 = mock.Mock(), mock.Mock()
     w1.done.return_value = False
     w2.done.return_value = False
-    conn._waiters[key][w1] = None
-    conn._waiters[key][w2] = None
+    _add_waiter(conn, key, w1)
+    _add_waiter(conn, key, w2)
     conn._release_waiter()
     assert w1.set_result.called
     assert not w2.set_result.called
@@ -613,11 +617,29 @@ async def test_release_waiter_skip_done_waiter(loop, key, key2) -> None:
     w1, w2 = mock.Mock(), mock.Mock()
     w1.done.return_value = True
     w2.done.return_value = False
-    conn._waiters[key][w1] = None
-    conn._waiters[key][w2] = None
+    _add_waiter(conn, key, w1)
+    _add_waiter(conn, key, w2)
     conn._release_waiter()
     assert not w1.set_result.called
     assert w2.set_result.called
+    await conn.close()
+
+
+async def test_release_waiter_skips_host_without_capacity(
+    key: ConnectionKey, other_host_key2: ConnectionKey
+) -> None:
+    conn = aiohttp.BaseConnector(limit=0, limit_per_host=1)
+    loop = asyncio.get_running_loop()
+    blocked_waiter = loop.create_future()
+    available_waiter = loop.create_future()
+    _add_waiter(conn, key, blocked_waiter)
+    _add_waiter(conn, other_host_key2, available_waiter)
+    conn._acquired_per_host[key].add(create_mocked_conn(loop))
+
+    conn._release_waiter()
+
+    assert not blocked_waiter.done()
+    assert available_waiter.done()
     await conn.close()
 
 
@@ -627,8 +649,8 @@ async def test_release_waiter_per_host(loop, key, key2) -> None:
     w1, w2 = mock.Mock(), mock.Mock()
     w1.done.return_value = False
     w2.done.return_value = False
-    conn._waiters[key][w1] = None
-    conn._waiters[key2][w2] = None
+    _add_waiter(conn, key, w1)
+    _add_waiter(conn, key2, w2)
     conn._release_waiter()
     assert (w1.set_result.called and not w2.set_result.called) or (
         not w1.set_result.called and w2.set_result.called
@@ -641,7 +663,7 @@ async def test_release_waiter_no_available(loop, key, key2) -> None:
     conn = aiohttp.BaseConnector(limit=0, loop=loop)
     w = mock.Mock()
     w.done.return_value = False
-    conn._waiters[key][w] = None
+    _add_waiter(conn, key, w)
     with mock.patch.object(
         conn, "_available_connections", autospec=True, spec_set=True, return_value=0
     ):
@@ -3592,6 +3614,25 @@ async def test_cancelled_waiter(loop) -> None:
     with pytest.raises(asyncio.CancelledError):
         await conn2
 
+    assert not conn._waiters
+    await conn.close()
+
+
+async def test_cancelled_waiters_remove_host_scheduler_entries() -> None:
+    loop = asyncio.get_running_loop()
+    conn = aiohttp.BaseConnector(limit=1)
+    conn._acquired.add(create_mocked_conn(loop))
+
+    for index in range(100):
+        req = mock.Mock()
+        req.connection_key = ConnectionKey(f"host-{index}", 80, False, True, None, None)
+        task = loop.create_task(conn.connect(req, [], ClientTimeout()))
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert not conn._waiters
     await conn.close()
 
 
@@ -4211,7 +4252,9 @@ async def test_connector_does_not_remove_needed_waiters(
             await asyncio.sleep(0)
         list(connector._waiters[connection_key])[0].set_result(None)
         del connector._waiters[connection_key]
-        connector._waiters[connection_key][dummy_waiter] = None
+        connector._waiters.setdefault(connection_key, OrderedDict())[
+            dummy_waiter
+        ] = None
 
     connector = aiohttp.BaseConnector()
     with mock.patch.object(
