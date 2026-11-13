@@ -7,6 +7,7 @@ import re
 import sys
 import traceback
 import warnings
+import weakref
 from asyncio.base_events import BaseEventLoop
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -58,7 +59,7 @@ from .http import (
     HttpVersion11,
     StreamWriter,
 )
-from .streams import StreamReader
+from .streams import EMPTY_PAYLOAD, StreamReader
 from .typedefs import (
     DEFAULT_JSON_DECODER,
     JSONDecoder,
@@ -89,7 +90,6 @@ if TYPE_CHECKING:
     from .tracing import Trace
 
 
-_CONNECTION_CLOSED_EXCEPTION = ClientConnectionError("Connection closed")
 _CONTAINS_CONTROL_CHAR_RE = re.compile(r"[^-!#$%&'*+.^_`|~0-9a-zA-Z]")
 json_re = re.compile(r"^application/(?:[\w.+-]+?\+)?json")
 _DIGITS_RE = re.compile(r"\d+", re.ASCII)
@@ -138,6 +138,38 @@ class RequestInfo(_RequestInfo):
         return tuple.__new__(
             cls, (url, method, headers, url if real_url is sentinel else real_url)
         )
+
+
+def _set_exception_context(
+    exc: BaseException,
+    *,
+    request_info: RequestInfo,
+    history: tuple["ClientResponse", ...],
+) -> None:
+    if isinstance(exc, ClientError):
+        if exc.request_info is None:
+            exc.request_info = request_info
+        if not exc.history:
+            exc.history = history
+
+
+async def _on_chunk_response_received(
+    chunk: bytes,
+    *,
+    traces: tuple["Trace", ...],
+    request_info: RequestInfo,
+    response_ref: "weakref.ReferenceType[ClientResponse]",
+) -> None:
+    try:
+        for trace in traces:
+            await trace.send_response_chunk_received(
+                request_info.method, request_info.url, chunk
+            )
+    except BaseException:
+        response = response_ref()
+        if response is not None:
+            response.close()
+        raise
 
 
 class Fingerprint:
@@ -775,6 +807,14 @@ class ClientResponse(HeadersMixin):
         # payload
         self.content = payload
 
+        if self._traces and payload is not EMPTY_PAYLOAD:
+            payload._on_chunk_received = functools.partial(
+                _on_chunk_response_received,
+                traces=tuple(self._traces),
+                request_info=self.request_info,
+                response_ref=weakref.ref(self),
+            )
+
         # cookies
         if cookie_hdrs := self.headers.getall(hdrs.SET_COOKIE, ()):
             # Store raw cookie headers for CookieJar
@@ -875,8 +915,13 @@ class ClientResponse(HeadersMixin):
 
     def _notify_content(self) -> None:
         content = self.content
-        if content and content.exception() is None:
-            set_exception(content, _CONNECTION_CLOSED_EXCEPTION)
+        # content can be None here, but the types are cheated elsewhere.
+        if content:  # type: ignore[truthy-bool]
+            if content.exception() is None:
+                set_exception(content, ClientConnectionError("Connection closed"))
+            # Drop the trace callback when the response is closed.
+            if content._on_chunk_received is not None:
+                content._on_chunk_received = None
         self._released = True
 
     async def wait_for_close(self) -> None:
@@ -893,10 +938,11 @@ class ClientResponse(HeadersMixin):
         if self._body is None:
             try:
                 self._body = await self.content.read()
-                for trace in self._traces:
-                    await trace.send_response_chunk_received(
-                        self.method, self.url, self._body
-                    )
+                if not self._body:
+                    for trace in self._traces:
+                        await trace.send_response_chunk_received(
+                            self.method, self.url, self._body
+                        )
             except BaseException as exc:
                 if isinstance(exc, ClientError):
                     if exc.request_info is None:
@@ -906,7 +952,13 @@ class ClientResponse(HeadersMixin):
                 self.close()
                 raise
         elif self._released:  # Response explicitly released
-            raise ClientConnectionError("Connection closed")
+            exc = ClientConnectionError("Connection closed")
+            _set_exception_context(
+                exc,
+                request_info=self.request_info,
+                history=self.history,
+            )
+            raise exc
 
         protocol = self._connection and self._connection.protocol
         if protocol is None or not protocol.upgraded:

@@ -2,8 +2,8 @@ import asyncio
 import collections
 import sys
 import warnings
-from collections.abc import Awaitable, Callable
-from typing import Final, Generic, TypeVar
+from collections.abc import Awaitable, Callable, Coroutine
+from typing import Final, Generic, NoReturn, TypeVar
 
 from .base_protocol import BaseProtocol
 from .helpers import (
@@ -99,8 +99,10 @@ class StreamReader:
         "_eof_waiter",
         "_exception",
         "_timer",
+        "_exception_handler",
         "_eof_callbacks",
         "_eof_counter",
+        "_on_chunk_received",
         "total_bytes",
         "total_compressed_bytes",
     )
@@ -134,8 +136,12 @@ class StreamReader:
         self._eof_waiter: asyncio.Future[None] | None = None
         self._exception: BaseException | None = None
         self._timer = TimerNoop() if timer is None else timer
+        self._exception_handler: Callable[[BaseException], None] | None = None
         self._eof_callbacks: list[Callable[[], None]] = []
         self._eof_counter = 0
+        self._on_chunk_received: (
+            Callable[[bytes], Coroutine[None, None, None]] | None
+        ) = None
         self.total_bytes = 0
         self.total_compressed_bytes: int | None = None
 
@@ -208,6 +214,23 @@ class StreamReader:
         if waiter is not None:
             self._eof_waiter = None
             set_exception(waiter, exc, exc_cause)
+
+    def _set_exception_handler(
+        self, handler: Callable[[BaseException], None] | None
+    ) -> None:
+        self._exception_handler = handler
+
+    def _notify_exception(self, exc: BaseException) -> None:
+        if self._exception_handler is not None:
+            self._exception_handler(exc)
+
+    def _raise_exception(self) -> NoReturn:
+        exc = self._exception
+        assert exc is not None
+        if isinstance(exc, type):
+            exc = exc()
+        self._notify_exception(exc)
+        raise exc
 
     def on_eof(self, callback: Callable[[], None]) -> None:
         if self._eof:
@@ -371,8 +394,28 @@ class StreamReader:
         try:
             with self._timer:
                 await waiter
+        except BaseException as exc:
+            self._notify_exception(exc)
+            raise
         finally:
             self._waiter = None
+
+    async def _fire_chunk_received(
+        self,
+        chunk: bytes,
+        cb: Callable[[bytes], Coroutine[None, None, None]] | None = None,
+    ) -> None:
+        if cb is None:
+            cb = self._on_chunk_received
+        assert cb is not None
+        # Run under the same per-stream timer that _wait() uses, so a hung
+        # trace handler is bounded by sock_read just like a hung socket read would be.
+        try:
+            with self._timer:
+                await cb(chunk)
+        except BaseException as exc:
+            self._notify_exception(exc)
+            raise
 
     async def readline(self, *, max_line_length: int | None = None) -> bytes:
         return await self.readuntil(max_size=max_line_length)
@@ -385,7 +428,7 @@ class StreamReader:
             raise ValueError("Separator should be at least one-byte string")
 
         if self._exception is not None:
-            raise self._exception
+            self._raise_exception()
 
         chunk = b""
         chunk_size = 0
@@ -425,11 +468,13 @@ class StreamReader:
             if not_enough:
                 await self._wait("readuntil")
 
+        if chunk and self._on_chunk_received is not None:
+            await self._fire_chunk_received(chunk)
         return chunk
 
     async def read(self, n: int = -1) -> bytes:
         if self._exception is not None:
-            raise self._exception
+            self._raise_exception()
 
         # migration problem; with DataQueue you have to catch
         # EofStream exception, so common way is to run payload.read() inside
@@ -466,11 +511,14 @@ class StreamReader:
         while not self._buffer and not self._eof:
             await self._wait("read")
 
-        return self._read_nowait(n)
+        chunk = self._read_nowait(n)
+        if chunk and self._on_chunk_received is not None:
+            await self._fire_chunk_received(chunk)
+        return chunk
 
     async def readany(self) -> bytes:
         if self._exception is not None:
-            raise self._exception
+            self._raise_exception()
 
         # TODO: should be `if` instead of `while`
         # because waiter maybe triggered on chunk end,
@@ -478,7 +526,10 @@ class StreamReader:
         while not self._buffer and not self._eof:
             await self._wait("readany")
 
-        return self._read_nowait(-1)
+        chunk = self._read_nowait(-1)
+        if chunk and self._on_chunk_received is not None:
+            await self._fire_chunk_received(chunk)
+        return chunk
 
     async def readchunk(self) -> tuple[bytes, bool]:
         """Returns a tuple of (data, end_of_http_chunk).
@@ -490,21 +541,27 @@ class StreamReader:
         """
         while True:
             if self._exception is not None:
-                raise self._exception
+                self._raise_exception()
 
             while self._http_chunk_splits:
                 pos = self._http_chunk_splits.popleft()
                 if pos == self._cursor:
                     return (b"", True)
                 if pos > self._cursor:
-                    return (self._read_nowait(pos - self._cursor), True)
+                    chunk = self._read_nowait(pos - self._cursor)
+                    if chunk and self._on_chunk_received is not None:
+                        await self._fire_chunk_received(chunk)
+                    return (chunk, True)
                 internal_logger.warning(
                     "Skipping HTTP chunk end due to data "
                     "consumption beyond chunk boundary"
                 )
 
             if self._buffer:
-                return (self._read_nowait_chunk(-1), False)
+                chunk = self._read_nowait_chunk(-1)
+                if chunk and self._on_chunk_received is not None:
+                    await self._fire_chunk_received(chunk)
+                return (chunk, False)
                 # return (self._read_nowait(-1), False)
 
             if self._eof:
@@ -516,7 +573,7 @@ class StreamReader:
 
     async def readexactly(self, n: int) -> bytes:
         if self._exception is not None:
-            raise self._exception
+            self._raise_exception()
 
         blocks: list[bytes] = []
         while n > 0:
@@ -535,14 +592,19 @@ class StreamReader:
         # I believe the most users don't know about the method and
         # they are not affected.
         if self._exception is not None:
-            raise self._exception
+            self._raise_exception()
 
         if self._waiter and not self._waiter.done():
             raise RuntimeError(
                 "Called while some coroutine is waiting for incoming data."
             )
 
-        return self._read_nowait(n)
+        chunk = self._read_nowait(n)
+        cb = self._on_chunk_received
+        if chunk and cb is not None:
+            # read_nowait is synchronous while trace callbacks are asynchronous.
+            asyncio.create_task(self._fire_chunk_received(chunk, cb))
+        return chunk
 
     def _read_nowait_chunk(self, n: int) -> bytes:
         first_buffer = self._buffer[0]
@@ -577,7 +639,11 @@ class StreamReader:
 
     def _read_nowait(self, n: int) -> bytes:
         """Read not more than n bytes, or whole buffer if n == -1"""
-        self._timer.assert_timeout()
+        try:
+            self._timer.assert_timeout()
+        except BaseException as exc:
+            self._notify_exception(exc)
+            raise
 
         if n == -1:
             # Drain only chunks present now; _read_nowait_chunk() can
@@ -601,6 +667,16 @@ class StreamReader:
 class EmptyStreamReader(StreamReader):  # lgtm [py/missing-call-to-init]
 
     __slots__ = ("_read_eof_chunk",)
+
+    @property
+    def _on_chunk_received(self) -> None:
+        return None
+
+    @_on_chunk_received.setter
+    def _on_chunk_received(
+        self, value: Callable[[bytes], Coroutine[None, None, None]] | None
+    ) -> None:
+        raise AttributeError("EmptyStreamReader._on_chunk_received is read-only")
 
     def __init__(self) -> None:
         self._read_eof_chunk = False

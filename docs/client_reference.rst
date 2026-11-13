@@ -2886,6 +2886,15 @@ All exceptions are available as members of *aiohttp* module.
       occurred.
 
 
+.. exception:: ClientTimeoutError
+   :canonical: aiohttp.client_exceptions.ClientTimeoutError
+
+   Total client request timeout, including while reading a response body.
+
+   This exception is also an :exc:`asyncio.TimeoutError`.
+
+   Derived from :exc:`ClientError` and :exc:`asyncio.TimeoutError`
+
 .. class:: ClientPayloadError
 
    This exception can only be raised while reading the response
@@ -3127,6 +3136,8 @@ Hierarchy of exceptions
 ^^^^^^^^^^^^^^^^^^^^^^^
 
 * :exc:`ClientError`
+
+  * :exc:`ClientTimeoutError`
 
   * :exc:`ClientConnectionError`
 

@@ -705,6 +705,27 @@ class TestStreamReader:
         stream.set_exception(exc)
         assert stream.exception() is exc
 
+    async def test_exception_class(self) -> None:
+        stream = self._make_one()
+        stream.set_exception(ValueError)
+
+        with pytest.raises(ValueError) as exc_info:
+            await stream.readany()
+
+        assert exc_info.type is ValueError
+        assert stream.exception() is ValueError
+
+    async def test_exception_class_with_waiter(self) -> None:
+        stream = self._make_one()
+        read_task = asyncio.create_task(stream.read())
+        await asyncio.sleep(0)
+
+        stream.set_exception(ValueError)
+
+        assert stream.exception() is ValueError
+        with pytest.raises(ValueError):
+            await read_task
+
     async def test_exception_waiter(self) -> None:
         loop = asyncio.get_event_loop()
         stream = self._make_one()
@@ -730,6 +751,7 @@ class TestStreamReader:
         await asyncio.sleep(0)
         t.cancel()
         await asyncio.sleep(0)
+        assert t.cancelled()
         # The following line fails if set_exception() isn't careful.
         stream.set_exception(RuntimeError("message"))
         await asyncio.sleep(0)
@@ -1784,3 +1806,28 @@ async def test_readany_does_not_drain_reentrant_refill(
     assert await stream.readany() == b"first"
     assert await stream.readany() == b"second"
     assert await stream.readany() == b"third"
+
+
+async def test_read_nowait_keeps_scheduled_trace_callback(protocol: mock.Mock) -> None:
+    loop = asyncio.get_running_loop()
+    stream = streams.StreamReader(protocol, limit=1024, loop=loop)
+    received: list[bytes] = []
+    loop_errors: list[dict[str, object]] = []
+    old_exception_handler = loop.get_exception_handler()
+
+    async def on_chunk_received(chunk: bytes) -> None:
+        received.append(chunk)
+
+    loop.set_exception_handler(lambda loop, context: loop_errors.append(context))
+    try:
+        stream._on_chunk_received = on_chunk_received
+        stream.feed_data(b"chunk")
+
+        assert stream.read_nowait() == b"chunk"
+        stream._on_chunk_received = None
+        await asyncio.sleep(0)
+
+        assert received == [b"chunk"]
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(old_exception_handler)
