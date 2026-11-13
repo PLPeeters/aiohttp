@@ -28,6 +28,7 @@ from ._cookie_helpers import (
 from .abc import AbstractStreamWriter
 from .client_exceptions import (
     ClientConnectionError,
+    ClientError,
     ClientOSError,
     ClientResponseError,
     ContentTypeError,
@@ -896,7 +897,12 @@ class ClientResponse(HeadersMixin):
                     await trace.send_response_chunk_received(
                         self.method, self.url, self._body
                     )
-            except BaseException:
+            except BaseException as exc:
+                if isinstance(exc, ClientError):
+                    if exc.request_info is None:
+                        exc.request_info = self.request_info
+                    if not exc.history and self.history:
+                        exc.history = self.history
                 self.close()
                 raise
         elif self._released:  # Response explicitly released

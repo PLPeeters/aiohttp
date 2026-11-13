@@ -1236,6 +1236,14 @@ def test_no_redirect_history_in_exception() -> None:
     assert () == cm.value.history
 
 
+def test_client_error_context_defaults() -> None:
+    exc = aiohttp.ClientError("failure")
+
+    assert exc.request_info is None
+    assert exc.history == ()
+    assert exc.args == ("failure",)
+
+
 def test_redirect_history_in_exception() -> None:
     hist_url = "http://def-cl-resp.org"
     url = "http://def-cl-resp.org/index.htm"

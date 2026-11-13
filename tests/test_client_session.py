@@ -3,6 +3,7 @@ import contextlib
 import gc
 import io
 import json
+import socket
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterator
 from http.cookies import BaseCookie, SimpleCookie
@@ -23,7 +24,8 @@ from aiohttp.client_reqrep import ClientRequest
 from aiohttp.connector import BaseConnector, Connection, TCPConnector, UnixConnector
 from aiohttp.helpers import DEBUG
 from aiohttp.http import RawResponseMessage
-from aiohttp.pytest_plugin import AiohttpServer
+from aiohttp.pytest_plugin import AiohttpClient, AiohttpServer
+from aiohttp.resolver import ThreadedResolver
 from aiohttp.test_utils import TestServer
 from aiohttp.tracing import Trace
 
@@ -502,6 +504,10 @@ async def test_reraise_os_error(create_session) -> None:
     req = mock.Mock()
     req_factory = mock.Mock(return_value=req)
     req.send = mock.AsyncMock(side_effect=err)
+    req.url = URL("http://example.com")
+    req.original_url = req.url
+    req.method = "GET"
+    req.headers = CIMultiDict()
     req._body = mock.Mock()
     req._body.close = mock.AsyncMock()
     session = await create_session(request_class=req_factory)
@@ -961,6 +967,113 @@ async def test_request_tracing(loop: asyncio.AbstractEventLoop, aiohttp_client) 
                 "utf8"
             )
             assert gathered_req_headers["Custom-Header"] == "Custom value"
+
+
+async def test_connection_error_has_failing_request_info_and_redirect_history(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    class FailingResolver(ThreadedResolver):
+        async def resolve(
+            self,
+            host: str,
+            port: int = 0,
+            family: socket.AddressFamily = socket.AF_INET,
+        ) -> list[abc.ResolveResult]:
+            raise OSError("DNS failure")
+
+    async def first(request: web.Request) -> web.StreamResponse:
+        raise web.HTTPFound("/second?hop=two")
+
+    async def second(request: web.Request) -> web.StreamResponse:
+        raise web.HTTPFound("http://dns-failure.invalid/fail?query=value")
+
+    app = web.Application()
+    app.router.add_get("/first", first)
+    app.router.add_get("/second", second)
+    resolver = FailingResolver()
+    connector = TCPConnector(resolver=resolver)
+    client = await aiohttp_client(app, connector=connector)
+
+    with pytest.raises(aiohttp.ClientConnectorDNSError) as exc_info:
+        await client.get("/first?hop=one")
+
+    error = exc_info.value
+    assert error.request_info is not None
+    assert str(error.request_info.url) == (
+        "http://dns-failure.invalid/fail?query=value"
+    )
+    assert error.request_info.method == "GET"
+    assert len(error.history) == 2
+    assert str(error.history[0].request_info.url).endswith("/first?hop=one")
+    assert str(error.history[1].request_info.url).endswith("/second?hop=two")
+    await resolver.close()
+
+
+async def test_proxy_connection_error_keeps_requested_url(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    client = await aiohttp_client(web.Application())
+    requested_url = URL("http://example.invalid/resource?query=value")
+
+    with pytest.raises(aiohttp.ClientProxyConnectionError) as exc_info:
+        await client.session.get(requested_url, proxy="http://127.0.0.1:0")
+
+    assert exc_info.value.request_info is not None
+    assert exc_info.value.request_info.url == requested_url
+
+
+async def test_pre_request_client_error_has_request_info(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    client = await aiohttp_client(web.Application())
+
+    with pytest.raises(aiohttp.NonHttpUrlClientError) as exc_info:
+        await client.session.get("ftp://example.invalid/resource?query=value")
+
+    assert exc_info.value.request_info is not None
+    assert str(exc_info.value.request_info.url) == (
+        "ftp://example.invalid/resource?query=value"
+    )
+    assert exc_info.value.request_info.method == "GET"
+
+
+async def test_pre_request_error_info_appends_query_params(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    client = await aiohttp_client(web.Application())
+
+    with pytest.raises(aiohttp.NonHttpUrlClientError) as exc_info:
+        await client.session.get("ftp://example.invalid/?x=one", params={"x": "two"})
+
+    assert str(exc_info.value.request_info.url) == "ftp://example.invalid/?x=one&x=two"
+
+
+async def test_pre_request_request_info_preserves_real_url_fragment(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    client = await aiohttp_client(web.Application())
+
+    with pytest.raises(aiohttp.NonHttpUrlClientError) as exc_info:
+        await client.session.get("ftp://example.invalid/path?query=value#fragment")
+
+    assert exc_info.value.request_info is not None
+    assert str(exc_info.value.request_info.url) == (
+        "ftp://example.invalid/path?query=value"
+    )
+    assert str(exc_info.value.request_info.real_url) == (
+        "ftp://example.invalid/path?query=value#fragment"
+    )
+
+
+async def test_pre_request_client_error_survives_unusable_params(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    client = await aiohttp_client(web.Application())
+
+    with pytest.raises(aiohttp.NonHttpUrlClientError):
+        await client.session.get(
+            "ftp://example.invalid/path", params={"x": None}  # type: ignore[dict-item]
+        )
 
 
 async def test_request_tracing_url_params(loop: Any, aiohttp_client: Any) -> None:

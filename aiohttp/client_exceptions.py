@@ -62,6 +62,9 @@ __all__ = (
 class ClientError(Exception):
     """Base class for client connection errors."""
 
+    request_info: "RequestInfo | None" = None
+    history: tuple[ClientResponse, ...] = ()
+
 
 class ClientResponseError(ClientError):
     """Base class for exceptions that occur after getting a response.
@@ -72,6 +75,8 @@ class ClientResponseError(ClientError):
     message: Error message.
     headers: Response headers.
     """
+
+    request_info: RequestInfo
 
     def __init__(
         self,

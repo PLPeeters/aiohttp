@@ -31,7 +31,7 @@ from typing import (
 )
 
 import attr
-from multidict import CIMultiDict, MultiDict, MultiDictProxy, istr
+from multidict import CIMultiDict, CIMultiDictProxy, MultiDict, MultiDictProxy, istr
 from yarl import URL
 
 from . import hdrs, http, payload
@@ -313,6 +313,15 @@ class _SessionOptions(TypedDict, total=False):
     fallback_charset_resolver: _CharsetResolver
     middlewares: Sequence[ClientMiddlewareType]
     ssl_shutdown_timeout: _SENTINEL | None | float
+
+
+def _request_info_from_request(req: ClientRequest) -> RequestInfo:
+    return RequestInfo(
+        req.url,
+        req.method,
+        CIMultiDictProxy(req.headers),
+        req.original_url,
+    )
 
 
 class ClientSession:
@@ -640,7 +649,10 @@ class ClientSession:
         # Only traces that saw send_request_start; they must also see a terminal event.
         traces: list[Trace] = []
         req: ClientRequest | None = None
+        active_req: ClientRequest | None = None
         resp: ClientResponse | None = None
+        request_url_for_info: URL | None = None
+        history: list[ClientResponse] = []
         try:
             if self.closed:
                 raise RuntimeError("Session is closed")
@@ -682,7 +694,6 @@ class ClientSession:
                 warnings.warn("Chunk size is deprecated #1615", DeprecationWarning)
 
             redirects = 0
-            history: list[ClientResponse] = []
             version = self._version
             params = params or {}
 
@@ -691,6 +702,7 @@ class ClientSession:
 
             try:
                 url = self._build_url(str_or_url)
+                request_url_for_info = url
             except ValueError as e:
                 raise InvalidUrlClientError(str_or_url) from e
 
@@ -771,7 +783,9 @@ class ClientSession:
                     self._retry_connection and method in IDEMPOTENT_METHODS
                 )
                 while True:
+                    active_req = None
                     url, auth_from_url = strip_auth_from_url(url)
+                    request_url_for_info = url
                     if not url.raw_host:
                         # NOTE: Bail early, otherwise, causes `InvalidURL` through
                         # NOTE: `self._request_class()` below.
@@ -872,11 +886,14 @@ class ClientSession:
                         traces=traces,
                         trust_env=self.trust_env,
                     )
+                    active_req = req
                     req._upload_tracker = upload_tracker
 
                     async def _connect_and_send_request(
                         req: ClientRequest,
                     ) -> ClientResponse:
+                        nonlocal active_req
+                        active_req = req
                         # connection timeout
                         assert self._connector is not None
                         if (tracker := req._upload_tracker) is not None:
@@ -886,9 +903,15 @@ class ClientSession:
                                 req, traces=traces, timeout=real_timeout
                             )
                         except TimeoutError as exc:
-                            raise ConnectionTimeoutError(
+                            error = ConnectionTimeoutError(
                                 f"Connection timeout to host {req.url}"
-                            ) from exc
+                            )
+                            error.request_info = _request_info_from_request(req)
+                            raise error from exc
+                        except ClientError as exc:
+                            if exc.request_info is None:
+                                exc.request_info = _request_info_from_request(req)
+                            raise
 
                         assert conn.protocol is not None
                         conn.protocol.set_response_params(
@@ -910,6 +933,11 @@ class ClientSession:
                             except BaseException:
                                 resp.close()
                                 raise
+                        except ClientError as exc:
+                            conn.close()
+                            if exc.request_info is None:
+                                exc.request_info = _request_info_from_request(req)
+                            raise
                         except BaseException:
                             conn.close()
                             raise
@@ -1100,6 +1128,25 @@ class ClientSession:
             return resp
 
         except BaseException as e:
+            if isinstance(e, ClientError):
+                if e.request_info is None:
+                    if active_req is not None:
+                        e.request_info = _request_info_from_request(active_req)
+                    elif request_url_for_info is not None:
+                        try:
+                            request_url = request_url_for_info.extend_query(params)
+                        except (TypeError, ValueError):
+                            request_url = request_url_for_info
+                        request_headers = CIMultiDictProxy(CIMultiDict(headers or {}))
+                        e.request_info = RequestInfo(
+                            request_url.with_fragment(None),
+                            method,
+                            request_headers,
+                            request_url,
+                        )
+                if not e.history and history:
+                    e.history = tuple(history)
+
             # cleanup timer
             if tm is not None:
                 tm.close()
@@ -1116,10 +1163,11 @@ class ClientSession:
             if req is not None and req._body is not None:
                 await req._body.close()
 
-            for trace in traces:
-                await trace.send_request_exception(
-                    method, url.update_query(params), headers, e  # type: ignore[arg-type]
-                )
+            if traces:
+                for trace in traces:
+                    await trace.send_request_exception(
+                        method, url.update_query(params), headers, e  # type: ignore[arg-type]
+                    )
             raise
 
     if TYPE_CHECKING:

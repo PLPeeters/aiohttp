@@ -2,11 +2,14 @@
 
 import json
 import socket
+from copy import copy
 from typing import NoReturn
 
 import pytest
+from yarl import URL
 
 from aiohttp import (
+    ClientConnectorError,
     ClientError,
     ClientHandlerType,
     ClientRequest,
@@ -58,6 +61,86 @@ async def test_client_middleware_called(aiohttp_server: AiohttpServer) -> None:
 
     assert middleware_called is True
     assert request_count == 1
+
+
+async def test_error_context_uses_middleware_replacement_request(
+    aiohttp_server: AiohttpServer,
+) -> None:
+    class FailingResolver(ThreadedResolver):
+        async def resolve(
+            self,
+            host: str,
+            port: int = 0,
+            family: socket.AddressFamily = socket.AF_INET,
+        ) -> list[ResolveResult]:
+            raise OSError("DNS failure")
+
+    async def replace_request(
+        request: ClientRequest, handler: ClientHandlerType
+    ) -> ClientResponse:
+        replacement = copy(request)
+        replacement.url = URL("http://replacement.invalid/replaced?query=value")
+        replacement.original_url = replacement.url
+        return await handler(replacement)
+
+    server = await aiohttp_server(web.Application())
+
+    resolver = FailingResolver()
+    connector = TCPConnector(resolver=resolver)
+    async with ClientSession(
+        connector=connector, middlewares=(replace_request,)
+    ) as session:
+        with pytest.raises(ClientConnectorError) as exc_info:
+            await session.get(server.make_url("/original"))
+
+    assert exc_info.value.request_info is not None
+    assert exc_info.value.request_info.url == URL(
+        "http://replacement.invalid/replaced?query=value"
+    )
+    await resolver.close()
+
+
+async def test_error_context_keeps_first_middleware_failure(
+    aiohttp_server: AiohttpServer,
+) -> None:
+    class FailingResolver(ThreadedResolver):
+        async def resolve(
+            self,
+            host: str,
+            port: int = 0,
+            family: socket.AddressFamily = socket.AF_INET,
+        ) -> list[ResolveResult]:
+            raise OSError("DNS failure")
+
+    def replace_url(request: ClientRequest, url: str) -> ClientRequest:
+        replacement = copy(request)
+        replacement.url = URL(url)
+        replacement.original_url = replacement.url
+        return replacement
+
+    async def retry_another_request(
+        request: ClientRequest, handler: ClientHandlerType
+    ) -> ClientResponse:
+        try:
+            return await handler(replace_url(request, "http://first.invalid/resource"))
+        except ClientConnectorError as first_error:
+            try:
+                await handler(replace_url(request, "http://second.invalid/resource"))
+            except ClientConnectorError:
+                raise first_error
+            raise AssertionError("expected the second request to fail")
+
+    resolver = FailingResolver()
+    connector = TCPConnector(resolver=resolver)
+    async with ClientSession(
+        connector=connector, middlewares=(retry_another_request,)
+    ) as session:
+        with pytest.raises(ClientConnectorError) as exc_info:
+            await session.get("http://original.invalid/resource")
+
+    assert exc_info.value.request_info is not None
+    assert exc_info.value.request_info.url == URL("http://first.invalid/resource")
+    await resolver.close()
 
 
 async def test_client_middleware_retry(aiohttp_server: AiohttpServer) -> None:
