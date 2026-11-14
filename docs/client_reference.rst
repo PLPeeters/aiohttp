@@ -197,7 +197,7 @@ The client session supports the context manager protocol for self closing.
 
       .. versionadded:: 2.3
 
-      .. versionchanged:: 4.0
+      .. versionchanged:: 3.14.6
 
          Automatic response decompression now runs in the event loop's default
          thread pool.

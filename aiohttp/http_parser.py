@@ -1030,9 +1030,8 @@ class HttpPayloadParser:
 
             required = self._length
             self._length = max(required - len(chunk), 0)
-            self._more_data_available = self.payload.feed_data(
-                chunk[:required], required
-            )
+            data = chunk[:required]
+            self._more_data_available = self.payload.feed_data(data, len(data))
             while self._more_data_available:
                 if self._paused:
                     self._paused = False
@@ -1120,9 +1119,8 @@ class HttpPayloadParser:
 
                     required = self._chunk_size
                     self._chunk_size = max(required - len(chunk), 0)
-                    self._more_data_available = self.payload.feed_data(
-                        chunk[:required], required
-                    )
+                    data = chunk[:required]
+                    self._more_data_available = self.payload.feed_data(data, len(data))
                     chunk = chunk[required:]
 
                     if self._more_data_available:

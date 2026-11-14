@@ -2,7 +2,6 @@
 
 import asyncio
 import zlib
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 import pytest
@@ -10,7 +9,6 @@ from yarl import URL
 
 from aiohttp import ClientSession, hdrs, request, web
 from aiohttp.pytest_plugin import AiohttpClient, AiohttpServer
-from aiohttp.test_utils import TestClient
 
 if TYPE_CHECKING:
     from pytest_codspeed import BenchmarkFixture
@@ -286,10 +284,8 @@ def test_get_request_with_251308_compressed_chunked_payload(
     ids=("raw", "gzip"),
 )
 def test_get_precompressed_response_decode(
-    event_loop: asyncio.AbstractEventLoop,
-    aiohttp_client_sync: Callable[
-        [web.Application], Awaitable[TestClient[web.Request, web.Application]]
-    ],
+    loop: asyncio.AbstractEventLoop,
+    aiohttp_client: AiohttpClient,
     benchmark: BenchmarkFixture,
     encoded: bool,
 ) -> None:
@@ -310,12 +306,15 @@ def test_get_precompressed_response_decode(
     app = web.Application()
     app.router.add_route("GET", "/", handler)
 
-    client = event_loop.run_until_complete(aiohttp_client_sync(app))
+    async def create_client():
+        return await aiohttp_client(app)
+
+    client = loop.run_until_complete(create_client())
 
     async def create_session() -> ClientSession:
         return ClientSession()
 
-    session = event_loop.run_until_complete(create_session())
+    session = loop.run_until_complete(create_session())
 
     async def run_client_benchmark() -> None:
         async with session.get(client.make_url("/")) as response:
@@ -325,11 +324,11 @@ def test_get_precompressed_response_decode(
 
         @benchmark
         def _run() -> None:
-            event_loop.run_until_complete(run_client_benchmark())
+            loop.run_until_complete(run_client_benchmark())
 
     finally:
-        event_loop.run_until_complete(session.close())
-        event_loop.run_until_complete(client.close())
+        loop.run_until_complete(session.close())
+        loop.run_until_complete(client.close())
 
 
 def test_one_hundred_get_requests_with_1024_content_length_payload(

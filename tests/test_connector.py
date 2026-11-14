@@ -3625,7 +3625,9 @@ async def test_cancelled_waiters_remove_host_scheduler_entries() -> None:
 
     for index in range(100):
         req = mock.Mock()
-        req.connection_key = ConnectionKey(f"host-{index}", 80, False, True, None, None)
+        req.connection_key = ConnectionKey(
+            f"host-{index}", 80, False, True, None, None, None
+        )
         task = loop.create_task(conn.connect(req, [], ClientTimeout()))
         await asyncio.sleep(0)
         task.cancel()

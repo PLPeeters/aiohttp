@@ -156,10 +156,12 @@ def stream():
 
 @pytest.fixture
 async def executor_protocol(
-    response_cls: type[HttpResponseParser], monkeypatch: pytest.MonkeyPatch
+    loop: asyncio.AbstractEventLoop,
+    response_cls: type[HttpResponseParser],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> ResponseHandler:
     monkeypatch.setattr("aiohttp.client_proto.HttpResponseParser", response_cls)
-    protocol = ResponseHandler(asyncio.get_running_loop())
+    protocol = ResponseHandler(loop)
     protocol.connection_made(mock.Mock())
     protocol.set_response_params(read_until_eof=True, read_bufsize=1024)
     return protocol
@@ -1926,12 +1928,12 @@ async def test_executor_decompression_feed_eof_preserves_pending_response(
 
 
 def test_executor_decompression_feed_eof_reports_incomplete_payload(
-    event_loop: asyncio.AbstractEventLoop,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
-    protocol = ResponseHandler(event_loop)
+    protocol = ResponseHandler(loop)
     parser = HttpResponseParserPy(
         protocol,
-        event_loop,
+        loop,
         DEFAULT_CHUNK_SIZE,
         max_line_size=8190,
         offload_decompression=True,
